@@ -1,0 +1,49 @@
+I've been delighted to have recently aquired a machine capable of running DOS
+natively, which re-ignited my interest in realmode 8086 assembly programming.
+
+This repository contains a few programs I wrote, mainly for fun.  The code
+is written with an XT-class system in mind, and so it should work even on the
+oldest of IBM PC compatibles.
+
+
+The nasm dialect of 8086 assembly is used.  To assemble any of the files within
+this directory, run:
+
+  nasm -f obj FILE.ASM
+
+You can aquire a copy of nasm here: https://nasm.us/
+
+
+Additionally, you will need a Relocatable Object Module Format (OMF) linker to
+create an executable file out of the assembled object files.
+
+The linker I use personally is Anthony A.J. Williams' ALink, which you can
+find here: http://alink.sourceforge.net/
+
+
+Description of the individual code files:
+
+  TEMPLATE.ASM - Template, inspired by the Art of Assembly book and NASM docs.
+
+  HELLO.ASM    - Prints a message and the command-line arguments.
+
+  DOSSYSCL.ASM - Routines to access DOS system calls in a well-defined manner,
+                 and a strerror implementation.  Only a handful of system calls,
+                 the ones I've needed thus far, are described here.
+
+  DOSSYSCL.INC - Additional information regarding the above file.
+
+  UTIL.ASM     - Various useful routines.
+
+  TESTUTIL.ASM - Test program for the routines in the above file.
+
+  B64.ASM      - Routines to encode and decode data to/from Base64.
+
+  B64_CMDL.ASM - Program to encode the command-line arguments into Base64,
+                 and decode them back.
+
+  B64_FC.ASM   - Base64 file encoding and decoding utility.
+
+                 Note: the current implementation doesn't allow spaces and
+                       other separators in the input when decoding Base64 data,
+                       and doesn't generate any when encoding into Base64.

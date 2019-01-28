@@ -1,0 +1,14 @@
+Since machines running primarily in realmode are long obsolete, and the purpose
+of this codebase is to play around with old computers, I see no reason for there
+to be any restrictions on the use of this codebase, therefore all code files
+within this repository are placed into the public domain.
+
+In case your juristiction does not allow individuals to place works into the
+public domain, the code files within this repository are released under the
+terms of the Creative Commons 0 license:
+
+
+To the extent possible under law, Marek Benc has waived all copyright and
+related or neighboring rights to all parts of this set of code files.
+
+Full text: http://creativecommons.org/publicdomain/zero/1.0/legalcode
