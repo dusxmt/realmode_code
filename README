@@ -47,3 +47,5 @@ Description of the individual code files:
                  Note: the current implementation doesn't allow spaces and
                        other separators in the input when decoding Base64 data,
                        and doesn't generate any when encoding into Base64.
+
+  SHA256.ASM   - SHA256 hashing module (not finished yet).
