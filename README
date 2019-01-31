@@ -48,4 +48,9 @@ Description of the individual code files:
                        other separators in the input when decoding Base64 data,
                        and doesn't generate any when encoding into Base64.
 
-  SHA256.ASM   - SHA256 hashing module (not finished yet).
+  SHA256.ASM   - SHA256 hashing module.
+
+  SHA256_P.ASM - Test program that generates a SHA256 hash for the provided
+                 command-line arguments text.
+
+  SHA256_F.ASM - SHA256 file checksum utility.

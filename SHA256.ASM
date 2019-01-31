@@ -28,7 +28,7 @@
 ; rounding the message off to 512 bits, and after a final hashing iteration,
 ; it reverses the bytes within the hash buffer so that it's big-endian,
 ; returning a pointer to this buffer within this module's data segment.  This
-; buffer is valid as long as no routine provided by this module is invoked.
+; buffer is valid for as long as no routine provided by this module is invoked.
 ;
 segment dseg public class=data
 		align		4
@@ -137,12 +137,1305 @@ message_bits:	resq		1
 
 ; Message chunk buffer:
 m_array:	resd		16
-bytes_in_m:	resw		1
+bytes_in_m:	resb		1
+
+; Work variables for sha256_hash_chunk:
+work_var_1:	resd		1
+work_var_2:	resd		1
+work_var_3:	resd		1
+work_var_4:	resd		1
+
+letter_work_vars:
+work_var_a:	resd		1
+work_var_b:	resd		1
+work_var_c:	resd		1
+work_var_d:	resd		1
+work_var_e:	resd		1
+work_var_f:	resd		1
+work_var_g:	resd		1
+work_var_h:	resd		1
+
+work_var_temp1:	resd		1
+work_var_temp2:	resd		1
 
 
 segment cseg public class=code align=16
 
+; Initialize the internal state of the module, and prepare it for receiving
+; data to hash.
+;
+; Inputs:
+;
+;   DS has to be set to the data segment of this module.
+;
+; Outputs: None.
+;
+; The values of all GPRs are preserved.
+;
+		global		sha256_init
+sha256_init:	push		ax
+		push		cx
+		push		si
+		push		di
+
+		; Initialize the hash:
+		mov		si, hash_init
+		mov		di, hash_current
+		mov		cx, si
+		add		cx, 8 * 4
+
+.hinit_loop:	mov		ax, [si]
+		mov		[di], ax
+		add		si, 2
+		add		di, 2
+		cmp		si, cx
+		jb		.hinit_loop
+
+		; Initialize the message length:
+		xor		ax, ax
+		mov		word [message_bits], ax
+		mov		word [message_bits+2], ax
+		mov		word [message_bits+4], ax
+		mov		word [message_bits+6], ax
+
+		; Initialize the message chunk buffer:
+		mov		byte [bytes_in_m], al
+
+		pop		di
+		pop		si
+		pop		cx
+		pop		ax
+		retn
+
+
+; Process the provided data buffer:
+;
+; This routine takes the provided buffer of data, fills the message buffer
+; with it, and upon each fill of 64 bytes it iterates thorugh the hashing
+; process.
+;
+; The routine itself merely loads the individual bytes of the message and
+; uses sha256_hash_byte to place them into the message buffer and process them.
+;
+;
+; Inputs:
+;
+;   DS has to be set to the data segment of this module.
+;
+;   ES:BX - Pointer to the first byte of the message chunk to hash.
+;   ES:DX - Pointer to the last byte of the message chunk to hash.
+;
+;   Note:  The reason for the use of a start and end index is to allow the use
+;          of a full 64K-sized buffer (a 16-bit size variable can describe
+;          a buffer at most 65535 large, which is 1 byte less than a full 64K).
+;
+; Outputs: None.
+;
+; The values of all GPRs are preserved.
+;
+		global		sha256_hash_data
+sha256_hash_data:
+		push		ax
+		push		bx
+
+.load_loop:	mov		al, [es:bx]
+		call near	sha256_hash_byte
+		cmp		bx, dx
+		jz		.done
+		inc		bx
+		jmp		.load_loop
+		
+.done:		pop		bx
+		pop		ax
+		retn
+
+
+; Add the provided byte into the message buffer:
+;
+;
+; This routine loads the provided byte into the message buffer.  The bytes are
+; interpreted as the intividual quarters of 32-bit big-endian words; the most
+; significant byte comes first and the least significant byte comes last.
+;
+; To achieve this ordering (given that the 8086 is a little-endian platform),
+; the two lowest bits of the index of the byte within the message buffer are
+; inverted, which causes the load order to be:
+;
+;   3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12, etc.
+;
+; Upon loading 512 bits (64 bytes, 16 32-bit values), the message is processed,
+; the registered message length is bumped up by 512, and the current hash value
+; is updated.
+;
+;
+; Inputs:
+;
+;   DS has to be set to the data segment of this module.
+;   AL - byte to add to the message buffer.
+;
+; Outputs: None.
+;
+; The values of all GPRs are preserved.
+;
+		global		sha256_hash_byte
+sha256_hash_byte:
+		push		ax
+		push		bx
+
+		mov		bl, [bytes_in_m]
+		xor		bh, bh
+
+		; By inverting the two LSBs of the current byte count, we get
+		; the index of where to load the byte into the message buffer.
+		mov		ah, bl
+		not		ah
+		and		ah, 03h
+		and		bl, 0FCh
+		or		bl, ah
+
+		mov		[m_array+bx], al
+
+		mov		al, [bytes_in_m]
+		inc		al
+		mov		[bytes_in_m], al
+
+		cmp		al, 64
+		jb		.skip_hash
+		call near	sha256_hash_chunk
+.skip_hash:
+		pop		bx
+		pop		ax
+		retn
+
+
+; Process an entire message chunk:
+;
+; In addition to performing the mathematical operations neccessary to calculate
+; the current intermediate hash value, this routine updates the message length
+; by incrementing the variable tracking it by 512 bits, which is the length of
+; a message chunk.
+;
+; You must manually subtract away processed padding bits from or add yet
+; un-processed message bits to the message length variable when producing the
+; last couple of message chunks in the sha256_finish routine.
+;
+;
+; Inputs:
+;
+;   DS has to be set to the data segment of this module.
+;   The data in the message chunk buffer is processed.
+;
+; Outputs:
+;
+;   The hash gets updated.
+;
+; The values of all GPRs are preserved.
+;
+sha256_hash_chunk:
+		push		ax
+		push		bx
+		push		cx
+		push		dx
+		push		di
+		push		si
+
+		; Do some book-keeping:
+		mov		cx, 512
+		mov		dx, message_bits
+		call near	add_64_16
+		mov		byte [bytes_in_m], 0
+
+
+		; Initialize the SHA-256 message schedule:
+		;
+		; The first 16 entries are a copy of the message buffer:
+		;
+		mov		si, m_array
+		mov		di, w_array
+		mov		cx, di
+		add		cx, 16 * 4
+
+.w16_loop:	mov		ax, [si]
+		mov		[di], ax
+		add		si, 2
+		add		di, 2
+		cmp		di, cx
+		jnz		.w16_loop
+
+		; As for w[16..63], they're defined as:
+		;
+		; w[j] <- lc_sgm0(w[j-15]) + lc_sgm1(w[j-2]) + w[j-7] + w[j-16]
+		;
+		mov		dx, di		; DX represents j (now 16)
+		add		di, 48 * 4	; DI represents 64
+
+		; Let w[j] <- w[j-16]:
+.w64_loop:	mov		si, dx
+		mov		bx, dx		; BX represents j
+		sub		si, 16 * 4	; SI represents j-16
+
+		mov		ax, [si]
+		mov		[bx], ax
+		mov		ax, [si+2]
+		mov		[bx+2], ax
+
+		; Let w[j] <- w[j] + w[j-7]:
+		add		si, 9 * 4	; SI represents j-7
+		mov		bx, dx		; Both BX and DX represent j
+		mov		cx, si		; CX represents j-7
+		call near	add_modulo_2_32
+
+		; Let work_var_1 <- lc_sgm0(w[j-15]):
+		sub		si, 8 * 4	; SI represents j-15
+		push		dx
+		mov		dx, work_var_1
+		mov		bx, si
+		call near	sha_func_lc_sigma0
+
+		; Let work_var_2 <- lc_sgm1(w[j-2]):
+		add		bx, 13 * 4	; BX represents j-2
+		mov		dx, work_var_2
+		call near	sha_func_lc_sigma1
+
+		; Let w[j] <- w[j] + work_var_2:
+		mov		cx, dx
+		pop		dx		; DX represents j
+		mov		bx, dx		; Both BX and DX represent j
+		call near	add_modulo_2_32
+
+		; Let w[j] <- w[j] + work_var_1:
+		mov		cx, work_var_1
+		call near	add_modulo_2_32
+
+		; Let j <- (j + 1):
+		add		dx, 4
+		
+		cmp		dx, di
+		jb		.w64_loop
+
+		; Initialize the a..f work wariables (to be the current hash):
+		mov		si, hash_current
+		mov		di, letter_work_vars
+		mov		cx, di
+		add		cx, 8 * 4
+
+.lww_init_loop:	mov		ax, [si]
+		mov		[di], ax
+		add		si, 2
+		add		di, 2
+		cmp		di, cx
+		jnz		.lww_init_loop
+
+		; Compression function main loop:
+		xor		di, di		; j <- 0.
+
+.cf_main_loop:	; Let work_var_1 <- Ch(e, f, g):
+		mov		bx, work_var_e
+		mov		cx, work_var_f
+		mov		si, work_var_g
+		mov		dx, work_var_1
+		call near	sha_func_ch_xyz
+
+		; Let work_var_2 <- Maj(a, b, c):
+		mov		bx, work_var_a
+		mov		cx, work_var_b
+		mov		si, work_var_c
+		mov		dx, work_var_2
+		call near	sha_func_maj_xyz
+
+		; Let work_var_3 <- uc_sgm0(a):
+		mov		dx, work_var_3
+		call near	sha_func_uc_sigma0
+
+		; Let work_var_4 <- uc_sgm1(e):
+		mov		bx, work_var_e
+		mov		dx, work_var_4
+		call near	sha_func_uc_sigma1
+
+		; Let temp1 <- k[j] + w[j]:
+		lea		bx, [di+k_table]
+		lea		cx, [di+w_array]
+		mov		dx, work_var_temp1
+		call near	add_modulo_2_32
+
+		; Let temp1 <- temp1 + h:
+		mov		bx, dx
+		mov		cx, work_var_h
+		call near	add_modulo_2_32
+
+		; Let temp1 <- temp1 + uc_sgm1(e):
+		mov		cx, work_var_4
+		call near	add_modulo_2_32
+
+		; Let temp1 <- temp1 + Ch(e, f, g):
+		mov		cx, work_var_1
+		call near	add_modulo_2_32
+
+		; Let temp2 <- uc_sgm0(a) + Maj(a, b, c):
+		mov		bx, work_var_3
+		mov		cx, work_var_2
+		mov		dx, work_var_temp2
+		call near	add_modulo_2_32
+
+		; Let h <- g:
+		mov		si, work_var_g
+		mov		bx, work_var_h
+		mov		ax, [si]
+		mov		[bx], ax
+		mov		ax, [si+2]
+		mov		[bx+2], ax
+
+		; Let g <- f:
+		mov		si, work_var_f
+		mov		bx, work_var_g
+		mov		ax, [si]
+		mov		[bx], ax
+		mov		ax, [si+2]
+		mov		[bx+2], ax
+
+		; Let f <- e:
+		mov		si, work_var_e
+		mov		bx, work_var_f
+		mov		ax, [si]
+		mov		[bx], ax
+		mov		ax, [si+2]
+		mov		[bx+2], ax
+
+		; Let e <- d:
+		mov		si, work_var_d
+		mov		bx, work_var_e
+		mov		ax, [si]
+		mov		[bx], ax
+		mov		ax, [si+2]
+		mov		[bx+2], ax
+
+		; Let e <- e + temp1
+		mov		dx, bx
+		mov		cx, work_var_temp1
+		call near	add_modulo_2_32
+
+		; Let d <- c:
+		mov		si, work_var_c
+		mov		bx, work_var_d
+		mov		ax, [si]
+		mov		[bx], ax
+		mov		ax, [si+2]
+		mov		[bx+2], ax
+
+		; Let c <- b:
+		mov		si, work_var_b
+		mov		bx, work_var_c
+		mov		ax, [si]
+		mov		[bx], ax
+		mov		ax, [si+2]
+		mov		[bx+2], ax
+
+		; Let b <- a:
+		mov		si, work_var_a
+		mov		bx, work_var_b
+		mov		ax, [si]
+		mov		[bx], ax
+		mov		ax, [si+2]
+		mov		[bx+2], ax
+
+		; Let a <- temp1 + temp2
+		mov		bx, work_var_temp1
+		mov		cx, work_var_temp2
+		mov		dx, work_var_a
+		call near	add_modulo_2_32
+
+		; Let j <- (j + 1)
+		add		di, 4
+
+		cmp		di, 64 * 4
+		jb		.cf_main_loop
+
+		; Compute the current intermediate value of the hash:
+		xor		si, si		; j <- 0.
+		mov		di, 8 * 4
+
+.hc_loop:	lea		bx, [hash_current+si]
+		lea		cx, [letter_work_vars+si]
+		mov		dx, bx
+		call near	add_modulo_2_32
+
+		add		si, 4		; j <- (j + 1)
+		cmp		si, di
+		jb		.hc_loop
+
+		pop		si
+		pop		di
+		pop		dx
+		pop		cx
+		pop		bx
+		pop		ax
+		retn
+
+
+; Terminate the message and reorder the hash bytes into big-endian:
+;
+; Inputs:
+;
+;   DS has to be set to the data segment of this module.
+;
+; Outputs:
+;
+;   DS:DX - pointer to the hash buffer.
+;
+; The values of all other GPRs are preserved.
+;
+		global		sha256_finish
+sha256_finish:	push		bp
+		mov		bp, sp
+
+		; Allocate space on the stack for the message length:
+		sub		sp, 8	; [bp-8]
+
+		push		ax	; [bp-10]
+		push		bx	; [bp-12]
+		push		cx	; [bp-14]
+		push		si	; [bp-16]
+
+		; Save the current message length and update it to contain
+		; the message bits that weren't yet hashed:
+		mov		ax, [message_bits]
+		mov		[bp-8], ax
+		mov		ax, [message_bits+2]
+		mov		[bp-6], ax
+		mov		ax, [message_bits+4]
+		mov		[bp-4], ax
+		mov		ax, [message_bits+6]
+		mov		[bp-2], ax
+
+		mov		cl, [bytes_in_m]
+		xor		ch, ch
+		test		cx, cx
+		jz		.skip_add_cx
+
+		mov		si, ds
+		mov		ax, ss
+		mov		ds, ax
+
+		lea		dx, [bp-8]
+		shl		cx, 1	; Shifting only a single bit at a time
+		shl		cx, 1	; for the sake of 8086 compatibility.
+		shl		cx, 1
+		call near	add_64_16
+		shr		cx, 1
+		shr		cx, 1
+		shr		cx, 1
+		mov		ds, si
+.skip_add_cx:
+		; Can we fit 9 bytes (message termination and length) into
+		; the current message chunk?
+		cmp		cx, 64 - 9
+		jbe		.can_fit
+
+		; Finish off the current chunk then:
+		mov		al, 80h
+		call near	sha256_hash_byte
+		inc		cx
+
+		xor		al, al
+.pad_loop1:	cmp		cx, 64
+		jz		.pl1_done
+
+		call near	sha256_hash_byte
+		inc		cx
+		jmp		.pad_loop1
+.pl1_done:	xor		cx, cx
+		jmp		.pad_loop2
+
+
+.can_fit:	mov		al, 80h
+		call near	sha256_hash_byte
+		inc		cx
+
+		xor		al, al
+.pad_loop2:	cmp		cx, 64 - 8
+		jz		.pl2_done
+
+		call near	sha256_hash_byte
+		inc		cx
+		jmp		.pad_loop2
+.pl2_done:	
+		; Hash the message length, load it in in big-endian order:
+		mov		al, [bp-1]
+		call near	sha256_hash_byte
+		mov		al, [bp-2]
+		call near	sha256_hash_byte
+		mov		al, [bp-3]
+		call near	sha256_hash_byte
+		mov		al, [bp-4]
+		call near	sha256_hash_byte
+		mov		al, [bp-5]
+		call near	sha256_hash_byte
+		mov		al, [bp-6]
+		call near	sha256_hash_byte
+		mov		al, [bp-7]
+		call near	sha256_hash_byte
+		mov		al, [bp-8]
+		call near	sha256_hash_byte
+
+		; The hash is now ready, now we just need to reverse the bytes
+		; of the 32-bit words so that they're in big-endian format:
+		;
+		mov		si, hash_current
+		mov		cx, si
+		add		cx, 8 * 4
+
+.bswap_loop:	mov		ax, [si]
+		mov		dx, [si+2]
+		xchg		al, ah
+		xchg		dl, dh
+		mov		[si+2], ax
+		mov		[si], dx
+
+		add		si, 4
+		cmp		si, cx
+		jb		.bswap_loop
+
+		mov		dx, hash_current
+
+		pop		si
+		pop		cx
+		pop		bx
+		pop		ax
+
+		mov		sp, bp
+		pop		bp
+		retn
+
+
+; The numeric functions that are used by SHA256:
+;
+
+; Perform the Ch(x, y, z) function:
+;
+; The Ch(x, z, y) function is defined as follows:
+;
+;   (X AND Y) XOR (complement(X) AND Z)
+;
+;
+; Inputs:
+;
+;   DS:BX - Argument X (pointer to a 32-bit little-endian number).
+;   DS:CX - Argument Y (pointer to a 32-bit little-endian number).
+;   DS:SI - Argument Z (pointer to a 32-bit little-endian number).
+;   DS:DX - Pointer to where the result should be stored.
+;
+;   Note:  It is permitted to have the pointers point at the same memory
+;          locations.
+;
+; Outputs:
+;
+;   The memory that DS:DX points to will be modified to contain the result.
+;   The values of all GPRs are preserved.
+; 
+sha_func_ch_xyz:
+		push		bp
+		mov		bp, sp
+
+		; Allocate 3 32-bit variables on the stack:
+		sub		sp, 12	; [bp-4], [bp-8], [bp-12]
+
+		; Back AX and ES up:
+		push		ax	; [bp-14]
+		mov		ax, es
+		push		ax	; [bp-16]
+
+		push		bx	; [bp-18]
+		push		cx	; [bp-20]
+		push		dx	; [bp-22]
+		push		di	; [bp-24]
+
+		; DI <- DS, ES <- DS, DS <- SS.
+		mov		di, ds
+		mov		es, di
+		mov		ax, ss
+		mov		ds, ax
+
+		; Load X and Y into [bp-4] and [bp-8]:
+		mov		ax, [es:bx]
+		mov		[bp-4], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-2], ax
+
+		mov		bx, cx
+		mov		ax, [es:bx]
+		mov		[bp-8], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-6], ax
+
+		; Let [bp-4] <- [bp-4] & [bp-8]:
+		lea		dx, [bp-4]
+		lea		bx, [bp-4]
+		lea		cx, [bp-8]
+		call near	and_32_32
+
+		; Load X into [bp-8] and bitwise complement it:
+		mov		bx, [bp-18]
+		mov		ax, [es:bx]
+		mov		[bp-8], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-6], ax
+		lea		bx, [bp-8]
+		lea		dx, [bp-8]
+		call near	complement_32
+
+		; Load Z into [bp-12], then let [bp-8] <- [bp-8] & [bp-12]:
+		mov		ax, [es:si]
+		mov		[bp-12], ax
+		mov		ax, [es:si+2]
+		mov		[bp-10], ax
+		lea		dx, [bp-8]
+		lea		bx, [bp-8]
+		lea		cx, [bp-12]
+		call near	and_32_32
+
+		; Let [bp-4] <- [bp-4] ^ [bp-8]:
+		lea		dx, [bp-4]
+		lea		bx, [bp-4]
+		lea		cx, [bp-8]
+		call near	xor_32_32
+
+		; The anser is in [bp-4], stash it:
+		mov		bx, [bp-22]
+		mov		ax, [bp-4]
+		mov		[es:bx], ax
+		mov		ax, [bp-2]
+		mov		[es:bx+2], ax
+
+		; Restore the data segment register and GPRs:
+		mov		ds, di
+
+		pop		di
+		pop		dx
+		pop		cx
+		pop		bx
+
+		; Restore AX and ES:
+		pop		ax
+		mov		es, ax
+		pop		ax
+
+		mov		sp, bp
+		pop		bp
+		retn
+
+
+; Perform the Maj(x, y, z) function:
+;
+; The Maj(x, z, y) function is defined as follows:
+;
+;   (X AND Y) XOR (X AND Z) XOR (Y AND Z)
+;
+;
+; Inputs:
+;
+;   DS:BX - Argument X (pointer to a 32-bit little-endian number).
+;   DS:CX - Argument Y (pointer to a 32-bit little-endian number).
+;   DS:SI - Argument Z (pointer to a 32-bit little-endian number).
+;   DS:DX - Pointer to where the result should be stored.
+;
+;   Note:  It is permitted to have the pointers point at the same memory
+;          locations.
+;
+; Outputs:
+;
+;   The memory that DS:DX points to will be modified to contain the result.
+;   The values of all GPRs are preserved.
+; 
+sha_func_maj_xyz:
+		push		bp
+		mov		bp, sp
+
+		; Allocate 3 32-bit variables on the stack:
+		sub		sp, 12	; [bp-4], [bp-8], [bp-12]
+
+		; Back AX and ES up:
+		push		ax	; [bp-14]
+		mov		ax, es
+		push		ax	; [bp-16]
+
+		push		bx	; [bp-18]
+		push		cx	; [bp-20]
+		push		dx	; [bp-22]
+		push		di	; [bp-24]
+
+		; DI <- DS, ES <- DS, DS <- SS.
+		mov		di, ds
+		mov		es, di
+		mov		ax, ss
+		mov		ds, ax
+
+		; Load X and Y into [bp-4] and [bp-8]:
+		mov		ax, [es:bx]
+		mov		[bp-4], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-2], ax
+
+		mov		bx, cx
+		mov		ax, [es:bx]
+		mov		[bp-8], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-6], ax
+
+		; Let [bp-4] <- [bp-4] & [bp-8]:
+		lea		dx, [bp-4]
+		lea		bx, [bp-4]
+		lea		cx, [bp-8]
+		call near	and_32_32
+
+		; Load X and Z into [bp-8] and [bp-12]:
+		mov		bx, [bp-18]
+		mov		ax, [es:bx]
+		mov		[bp-8], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-6], ax
+
+		mov		ax, [es:si]
+		mov		[bp-12], ax
+		mov		ax, [es:si+2]
+		mov		[bp-10], ax
+
+		; Let [bp-8] <- [bp-8] & [bp-12]:
+		lea		dx, [bp-8]
+		lea		bx, [bp-8]
+		lea		cx, [bp-12]
+		call near	and_32_32
+
+		; Let [bp-4] <- [bp-4] ^ [bp-8]:
+		lea		dx, [bp-4]
+		lea		bx, [bp-4]
+		lea		cx, [bp-8]
+		call near	xor_32_32
+
+		; Load Y into [bp-8], note: [bp-12] already contains Z.
+		mov		bx, [bp-20]
+		mov		ax, [es:bx]
+		mov		[bp-8], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-6], ax
+
+		; Let [bp-8] <- [bp-8] & [bp-12]:
+		lea		dx, [bp-8]
+		lea		bx, [bp-8]
+		lea		cx, [bp-12]
+		call near	and_32_32
+
+		; Let [bp-4] <- [bp-4] ^ [bp-8]:
+		lea		dx, [bp-4]
+		lea		bx, [bp-4]
+		lea		cx, [bp-8]
+		call near	xor_32_32
+
+		; The anser is in [bp-4], stash it:
+		mov		bx, [bp-22]
+		mov		ax, [bp-4]
+		mov		[es:bx], ax
+		mov		ax, [bp-2]
+		mov		[es:bx+2], ax
+
+		; Restore the data segment register and GPRs:
+		mov		ds, di
+
+		pop		di
+		pop		dx
+		pop		cx
+		pop		bx
+
+		; Restore AX and ES:
+		pop		ax
+		mov		es, ax
+		pop		ax
+
+		mov		sp, bp
+		pop		bp
+		retn
+
+
+; Perform the upper-case Sigma0(x) function:
+;
+; The upper-case Sigma0(x) function is defined as follows:
+;
+;   ROR(X, 2) XOR ROR(X, 13) XOR ROR(X, 22)
+;
+;
+; Inputs:
+;
+;   DS:BX - Argument X (pointer to a 32-bit little-endian number).
+;   DS:DX - Pointer to where the result should be stored.
+;
+;   Note:  It is permitted to have the pointers point at the same memory
+;          locations.
+;
+; Outputs:
+;
+;   The memory that DS:DX points to will be modified to contain the result.
+;   The values of all GPRs are preserved.
+; 
+sha_func_uc_sigma0:
+		push		bp
+		mov		bp, sp
+
+		; Allocate 2 32-bit variables on the stack:
+		sub		sp, 8	; [bp-4], [bp-8]
+
+		; Back AX and ES up:
+		push		ax	; [bp-10]
+		mov		ax, es
+		push		ax	; [bp-12]
+
+		push		bx	; [bp-14]
+		push		cx	; [bp-16]
+		push		dx	; [bp-18]
+		push		di	; [bp-20]
+
+		; DI <- DS, ES <- DS, DS <- SS.
+		mov		di, ds
+		mov		es, di
+		mov		ax, ss
+		mov		ds, ax
+
+		; Load X into [bp-4]:
+		mov		ax, [es:bx]
+		mov		[bp-4], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-2], ax
+
+		; Rotate [bp-4] right by 2 bits:
+		lea		bx, [bp-4]
+		lea		dx, [bp-4]
+		mov		cl, 2
+		call near	rotate_right_32
+
+		; Load X into [bp-8]:
+		mov		bx, [bp-14]
+		mov		ax, [es:bx]
+		mov		[bp-8], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-6], ax
+
+		; Rotate [bp-8] right by 13 bits:
+		lea		bx, [bp-8]
+		lea		dx, [bp-8]
+		mov		cl, 13
+		call near	rotate_right_32
+
+		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		lea		dx, [bp-4]
+		lea		bx, [bp-4]
+		lea		cx, [bp-8]
+		call near	xor_32_32
+
+		; Load X into [bp-8]:
+		mov		bx, [bp-14]
+		mov		ax, [es:bx]
+		mov		[bp-8], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-6], ax
+
+		; Rotate [bp-8] right by 22 bits:
+		lea		bx, [bp-8]
+		lea		dx, [bp-8]
+		mov		cl, 22		; TODO: Skip the above load and
+		call near	rotate_right_32	; rotate by 9.
+
+		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		lea		dx, [bp-4]
+		lea		bx, [bp-4]
+		lea		cx, [bp-8]
+		call near	xor_32_32
+
+		; The anser is in [bp-4], stash it:
+		mov		bx, [bp-18]
+		mov		ax, [bp-4]
+		mov		[es:bx], ax
+		mov		ax, [bp-2]
+		mov		[es:bx+2], ax
+
+		; Restore the data segment register and GPRs:
+		mov		ds, di
+
+		pop		di
+		pop		dx
+		pop		cx
+		pop		bx
+
+		; Restore AX and ES:
+		pop		ax
+		mov		es, ax
+		pop		ax
+
+		mov		sp, bp
+		pop		bp
+		retn
+
+
+; Perform the upper-case Sigma1(x) function:
+;
+; The upper-case Sigma1(x) function is defined as follows:
+;
+;   ROR(X, 6) XOR ROR(X, 11) XOR ROR(X, 25)
+;
+;
+; Inputs:
+;
+;   DS:BX - Argument X (pointer to a 32-bit little-endian number).
+;   DS:DX - Pointer to where the result should be stored.
+;
+;   Note:  It is permitted to have the pointers point at the same memory
+;          locations.
+;
+; Outputs:
+;
+;   The memory that DS:DX points to will be modified to contain the result.
+;   The values of all GPRs are preserved.
+; 
+sha_func_uc_sigma1:
+		push		bp
+		mov		bp, sp
+
+		; Allocate 2 32-bit variables on the stack:
+		sub		sp, 8	; [bp-4], [bp-8]
+
+		; Back AX and ES up:
+		push		ax	; [bp-10]
+		mov		ax, es
+		push		ax	; [bp-12]
+
+		push		bx	; [bp-14]
+		push		cx	; [bp-16]
+		push		dx	; [bp-18]
+		push		di	; [bp-20]
+
+		; DI <- DS, ES <- DS, DS <- SS.
+		mov		di, ds
+		mov		es, di
+		mov		ax, ss
+		mov		ds, ax
+
+		; Load X into [bp-4]:
+		mov		ax, [es:bx]
+		mov		[bp-4], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-2], ax
+
+		; Rotate [bp-4] right by 6 bits:
+		lea		bx, [bp-4]
+		lea		dx, [bp-4]
+		mov		cl, 6
+		call near	rotate_right_32
+
+		; Load X into [bp-8]:
+		mov		bx, [bp-14]
+		mov		ax, [es:bx]
+		mov		[bp-8], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-6], ax
+
+		; Rotate [bp-8] right by 11 bits:
+		lea		bx, [bp-8]
+		lea		dx, [bp-8]
+		mov		cl, 11
+		call near	rotate_right_32
+
+		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		lea		dx, [bp-4]
+		lea		bx, [bp-4]
+		lea		cx, [bp-8]
+		call near	xor_32_32
+
+		; Load X into [bp-8]:
+		mov		bx, [bp-14]
+		mov		ax, [es:bx]
+		mov		[bp-8], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-6], ax
+
+		; Rotate [bp-8] right by 25 bits:
+		lea		bx, [bp-8]
+		lea		dx, [bp-8]
+		mov		cl, 25		; TODO: Skip the above load and
+		call near	rotate_right_32	; rotate by 14.
+
+		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		lea		dx, [bp-4]
+		lea		bx, [bp-4]
+		lea		cx, [bp-8]
+		call near	xor_32_32
+
+		; The anser is in [bp-4], stash it:
+		mov		bx, [bp-18]
+		mov		ax, [bp-4]
+		mov		[es:bx], ax
+		mov		ax, [bp-2]
+		mov		[es:bx+2], ax
+
+		; Restore the data segment register and GPRs:
+		mov		ds, di
+
+		pop		di
+		pop		dx
+		pop		cx
+		pop		bx
+
+		; Restore AX and ES:
+		pop		ax
+		mov		es, ax
+		pop		ax
+
+		mov		sp, bp
+		pop		bp
+		retn
+
+
+; Perform the lower-case Sigma0(x) function:
+;
+; The lower-case Sigma0(x) function is defined as follows:
+;
+;   ROR(X, 7) XOR ROR(X, 18) XOR SHR(X, 3)
+;
+;
+; Inputs:
+;
+;   DS:BX - Argument X (pointer to a 32-bit little-endian number).
+;   DS:DX - Pointer to where the result should be stored.
+;
+;   Note:  It is permitted to have the pointers point at the same memory
+;          locations.
+;
+; Outputs:
+;
+;   The memory that DS:DX points to will be modified to contain the result.
+;   The values of all GPRs are preserved.
+; 
+sha_func_lc_sigma0:
+		push		bp
+		mov		bp, sp
+
+		; Allocate 2 32-bit variables on the stack:
+		sub		sp, 8	; [bp-4], [bp-8]
+
+		; Back AX and ES up:
+		push		ax	; [bp-10]
+		mov		ax, es
+		push		ax	; [bp-12]
+
+		push		bx	; [bp-14]
+		push		cx	; [bp-16]
+		push		dx	; [bp-18]
+		push		di	; [bp-20]
+
+		; DI <- DS, ES <- DS, DS <- SS.
+		mov		di, ds
+		mov		es, di
+		mov		ax, ss
+		mov		ds, ax
+
+		; Load X into [bp-4]:
+		mov		ax, [es:bx]
+		mov		[bp-4], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-2], ax
+
+		; Rotate [bp-4] right by 7 bits:
+		lea		bx, [bp-4]
+		lea		dx, [bp-4]
+		mov		cl, 7
+		call near	rotate_right_32
+
+		; Load X into [bp-8]:
+		mov		bx, [bp-14]
+		mov		ax, [es:bx]
+		mov		[bp-8], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-6], ax
+
+		; Rotate [bp-8] right by 18 bits:
+		lea		bx, [bp-8]
+		lea		dx, [bp-8]
+		mov		cl, 18
+		call near	rotate_right_32
+
+		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		lea		dx, [bp-4]
+		lea		bx, [bp-4]
+		lea		cx, [bp-8]
+		call near	xor_32_32
+
+		; Load X into [bp-8]:
+		mov		bx, [bp-14]
+		mov		ax, [es:bx]
+		mov		[bp-8], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-6], ax
+
+		; Shift [bp-8] right by 3 bits:
+		lea		bx, [bp-8]
+		lea		dx, [bp-8]
+		mov		cl, 3
+		call near	shift_right_32
+
+		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		lea		dx, [bp-4]
+		lea		bx, [bp-4]
+		lea		cx, [bp-8]
+		call near	xor_32_32
+
+		; The anser is in [bp-4], stash it:
+		mov		bx, [bp-18]
+		mov		ax, [bp-4]
+		mov		[es:bx], ax
+		mov		ax, [bp-2]
+		mov		[es:bx+2], ax
+
+		; Restore the data segment register and GPRs:
+		mov		ds, di
+
+		pop		di
+		pop		dx
+		pop		cx
+		pop		bx
+
+		; Restore AX and ES:
+		pop		ax
+		mov		es, ax
+		pop		ax
+
+		mov		sp, bp
+		pop		bp
+		retn
+
+
+; Perform the lower-case Sigma1(x) function:
+;
+; The lower-case Sigma1(x) function is defined as follows:
+;
+;   ROR(X, 17) XOR ROR(X, 19) XOR SHR(X, 10)
+;
+;
+; Inputs:
+;
+;   DS:BX - Argument X (pointer to a 32-bit little-endian number).
+;   DS:DX - Pointer to where the result should be stored.
+;
+;   Note:  It is permitted to have the pointers point at the same memory
+;          locations.
+;
+; Outputs:
+;
+;   The memory that DS:DX points to will be modified to contain the result.
+;   The values of all GPRs are preserved.
+; 
+sha_func_lc_sigma1:
+		push		bp
+		mov		bp, sp
+
+		; Allocate 2 32-bit variables on the stack:
+		sub		sp, 8	; [bp-4], [bp-8]
+
+		; Back AX and ES up:
+		push		ax	; [bp-10]
+		mov		ax, es
+		push		ax	; [bp-12]
+
+		push		bx	; [bp-14]
+		push		cx	; [bp-16]
+		push		dx	; [bp-18]
+		push		di	; [bp-20]
+
+		; DI <- DS, ES <- DS, DS <- SS.
+		mov		di, ds
+		mov		es, di
+		mov		ax, ss
+		mov		ds, ax
+
+		; Load X into [bp-4]:
+		mov		ax, [es:bx]
+		mov		[bp-4], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-2], ax
+
+		; Rotate [bp-4] right by 17 bits:
+		lea		bx, [bp-4]
+		lea		dx, [bp-4]
+		mov		cl, 17
+		call near	rotate_right_32
+
+		; Load X into [bp-8]:
+		mov		bx, [bp-14]
+		mov		ax, [es:bx]
+		mov		[bp-8], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-6], ax
+
+		; Rotate [bp-8] right by 19 bits:
+		lea		bx, [bp-8]
+		lea		dx, [bp-8]
+		mov		cl, 19
+		call near	rotate_right_32
+
+		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		lea		dx, [bp-4]
+		lea		bx, [bp-4]
+		lea		cx, [bp-8]
+		call near	xor_32_32
+
+		; Load X into [bp-8]:
+		mov		bx, [bp-14]
+		mov		ax, [es:bx]
+		mov		[bp-8], ax
+		mov		ax, [es:bx+2]
+		mov		[bp-6], ax
+
+		; Shift [bp-8] right by 10 bits:
+		lea		bx, [bp-8]
+		lea		dx, [bp-8]
+		mov		cl, 10
+		call near	shift_right_32
+
+		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		lea		dx, [bp-4]
+		lea		bx, [bp-4]
+		lea		cx, [bp-8]
+		call near	xor_32_32
+
+		; The anser is in [bp-4], stash it:
+		mov		bx, [bp-18]
+		mov		ax, [bp-4]
+		mov		[es:bx], ax
+		mov		ax, [bp-2]
+		mov		[es:bx+2], ax
+
+		; Restore the data segment register and GPRs:
+		mov		ds, di
+
+		pop		di
+		pop		dx
+		pop		cx
+		pop		bx
+
+		; Restore AX and ES:
+		pop		ax
+		mov		es, ax
+		pop		ax
+
+		mov		sp, bp
+		pop		bp
+		retn
+
+
+; The message length in bits is 64-bit, and the message chunk size is 512 bits,
+; so the following routine should be sufficient for maintaining the message
+; length variable: 
+
 ; Add a 16-bit number to a 64-bit number:
+;
+; The purpose of this routine is to add the number of processed bits to the
+; variable tracking the length of the message.
+;
 ;
 ; Inputs:
 ;
@@ -182,6 +1475,10 @@ add_64_16:	push		ax
 		pop		ax
 		retn
 
+
+; Basic operations on 32-bit little-endinan numbers:
+;
+
 ; Add two 32-bit numbers modulo 2^32 (whihch basically means discarding carry):
 ;
 ; Inputs:
@@ -220,6 +1517,7 @@ add_modulo_2_32:
 		pop		ax
 		retn
 
+
 ; Bitwise AND of two 32-bit numbers:
 ;
 ; Inputs:
@@ -257,6 +1555,7 @@ and_32_32:	push		ax
 		pop		ax
 		retn
 
+
 ; Bitwise OR of two 32-bit numbers:
 ;
 ; Inputs:
@@ -293,6 +1592,7 @@ or_32_32:	push		ax
 
 		pop		ax
 		retn
+
 
 ; Bitwise XOR of two 32-bit numbers:
 ;
@@ -332,6 +1632,7 @@ xor_32_32:
 		pop		ax
 		retn
 
+
 ; Bitwise complement of a 32-bit number:
 ;
 ; Inputs:
@@ -363,6 +1664,7 @@ complement_32:	push		ax
 
 		pop		ax
 		retn
+
 
 ; Logical right shift of a 32-bit number:
 ;
@@ -622,715 +1924,6 @@ rotate_right_32:
 		xchg		bx, dx
 
 		pop		cx
-		pop		ax
-
-		mov		sp, bp
-		pop		bp
-		retn
-
-; Perform the Ch(x, y, z) function:
-;
-; The Ch(x, z, y) function is defined as follows:
-;
-;   (X AND Y) XOR (complement(X) AND Z)
-;
-;
-; Inputs:
-;
-;   DS:BX - Argument X (pointer to a 32-bit little-endian number).
-;   DS:CX - Argument Y (pointer to a 32-bit little-endian number).
-;   DS:SI - Argument Z (pointer to a 32-bit little-endian number).
-;   DS:DX - Pointer to where the result should be stored.
-;
-;   Note:  It is permitted to have the pointers point at the same memory
-;          locations.
-;
-; Outputs:
-;
-;   The memory that DS:DX points to will be modified to contain the result.
-;   The values of all GPRs are preserved.
-; 
-sha_function_ch_xyz:
-		push		bp
-		mov		bp, sp
-
-		; Allocate 3 32-bit variables on the stack:
-		sub		sp, 12	; [bp-4], [bp-8], [bp-12]
-
-		; Back AX and ES up:
-		push		ax	; [bp-14]
-		mov		ax, es
-		push		ax	; [bp-16]
-
-		push		bx	; [bp-18]
-		push		cx	; [bp-20]
-		push		dx	; [bp-22]
-		push		di	; [bp-24]
-
-		; DI <- DS, ES <- DS, DS <- SS.
-		mov		di, ds
-		mov		es, di
-		mov		ax, ss
-		mov		ds, ax
-
-		; Load X and Y into [bp-4] and [bp-8]:
-		mov		ax, [es:bx]
-		mov		[bp-4], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-2], ax
-
-		mov		bx, cx
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-
-		; Let [bp-4] <- [bp-4] & [bp-8]:
-		lea		dx, [bp-4]
-		lea		bx, [bp-4]
-		lea		cx, [bp-8]
-		call near	and_32_32
-
-		; Load X into [bp-8] and bitwise complement it:
-		mov		bx, [bp-18]
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-		lea		bx, [bp-8]
-		lea		dx, [bp-8]
-		call near	complement_32
-
-		; Load Z into [bp-12], then let [bp-8] <- [bp-8] & [bp-12]:
-		mov		ax, [es:si]
-		mov		[bp-12], ax
-		mov		ax, [es:si+2]
-		mov		[bp-10], ax
-		lea		dx, [bp-8]
-		lea		bx, [bp-8]
-		lea		cx, [bp-12]
-		call near	and_32_32
-
-		; Let [bp-4] <- [bp-4] ^ [bp-8]:
-		lea		dx, [bp-4]
-		lea		bx, [bp-4]
-		lea		cx, [bp-8]
-		call near	xor_32_32
-
-		; The anser is in [bp-4], stash it:
-		mov		bx, [bp-22]
-		mov		ax, [bp-4]
-		mov		[es:bx], ax
-		mov		ax, [bp-2]
-		mov		[es:bx+2], ax
-
-		; Restore the data segment register and GPRs:
-		mov		ds, di
-
-		pop		di
-		pop		dx
-		pop		cx
-		pop		bx
-
-		; Restore AX and ES:
-		pop		ax
-		mov		es, ax
-		pop		ax
-
-		mov		sp, bp
-		pop		bp
-		retn
-
-; Perform the Maj(x, y, z) function:
-;
-; The Maj(x, z, y) function is defined as follows:
-;
-;   (X AND Y) XOR (X AND Z) XOR (Y AND Z)
-;
-;
-; Inputs:
-;
-;   DS:BX - Argument X (pointer to a 32-bit little-endian number).
-;   DS:CX - Argument Y (pointer to a 32-bit little-endian number).
-;   DS:SI - Argument Z (pointer to a 32-bit little-endian number).
-;   DS:DX - Pointer to where the result should be stored.
-;
-;   Note:  It is permitted to have the pointers point at the same memory
-;          locations.
-;
-; Outputs:
-;
-;   The memory that DS:DX points to will be modified to contain the result.
-;   The values of all GPRs are preserved.
-; 
-sha_function_maj_xyz:
-		push		bp
-		mov		bp, sp
-
-		; Allocate 3 32-bit variables on the stack:
-		sub		sp, 12	; [bp-4], [bp-8], [bp-12]
-
-		; Back AX and ES up:
-		push		ax	; [bp-14]
-		mov		ax, es
-		push		ax	; [bp-16]
-
-		push		bx	; [bp-18]
-		push		cx	; [bp-20]
-		push		dx	; [bp-22]
-		push		di	; [bp-24]
-
-		; DI <- DS, ES <- DS, DS <- SS.
-		mov		di, ds
-		mov		es, di
-		mov		ax, ss
-		mov		ds, ax
-
-		; Load X and Y into [bp-4] and [bp-8]:
-		mov		ax, [es:bx]
-		mov		[bp-4], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-2], ax
-
-		mov		bx, cx
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-
-		; Let [bp-4] <- [bp-4] & [bp-8]:
-		lea		dx, [bp-4]
-		lea		bx, [bp-4]
-		lea		cx, [bp-8]
-		call near	and_32_32
-
-		; Load X and Z into [bp-8] and [bp-12]:
-		mov		bx, [bp-18]
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-
-		mov		ax, [es:si]
-		mov		[bp-12], ax
-		mov		ax, [es:si+2]
-		mov		[bp-10], ax
-
-		; Let [bp-8] <- [bp-8] & [bp-12]:
-		lea		dx, [bp-8]
-		lea		bx, [bp-8]
-		lea		cx, [bp-12]
-		call near	and_32_32
-
-		; Let [bp-4] <- [bp-4] ^ [bp-8]:
-		lea		dx, [bp-4]
-		lea		bx, [bp-4]
-		lea		cx, [bp-8]
-		call near	xor_32_32
-
-		; Load Y into [bp-8], note: [bp-12] already contains Z.
-		mov		bx, [bp-20]
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-
-		; Let [bp-8] <- [bp-8] & [bp-12]:
-		lea		dx, [bp-8]
-		lea		bx, [bp-8]
-		lea		cx, [bp-12]
-		call near	and_32_32
-
-		; Let [bp-4] <- [bp-4] ^ [bp-8]:
-		lea		dx, [bp-4]
-		lea		bx, [bp-4]
-		lea		cx, [bp-8]
-		call near	xor_32_32
-
-		; The anser is in [bp-4], stash it:
-		mov		bx, [bp-22]
-		mov		ax, [bp-4]
-		mov		[es:bx], ax
-		mov		ax, [bp-2]
-		mov		[es:bx+2], ax
-
-		; Restore the data segment register and GPRs:
-		mov		ds, di
-
-		pop		di
-		pop		dx
-		pop		cx
-		pop		bx
-
-		; Restore AX and ES:
-		pop		ax
-		mov		es, ax
-		pop		ax
-
-		mov		sp, bp
-		pop		bp
-		retn
-
-; Perform the upper-case Sigma0(x) function:
-;
-; The upper-case Sigma0(x) function is defined as follows:
-;
-;   ROR(X, 2) XOR ROR(X, 13) XOR ROR(X, 22)
-;
-;
-; Inputs:
-;
-;   DS:BX - Argument X (pointer to a 32-bit little-endian number).
-;   DS:DX - Pointer to where the result should be stored.
-;
-;   Note:  It is permitted to have the pointers point at the same memory
-;          locations.
-;
-; Outputs:
-;
-;   The memory that DS:DX points to will be modified to contain the result.
-;   The values of all GPRs are preserved.
-; 
-uc_sigma0:	push		bp
-		mov		bp, sp
-
-		; Allocate 2 32-bit variables on the stack:
-		sub		sp, 8	; [bp-4], [bp-8]
-
-		; Back AX and ES up:
-		push		ax	; [bp-10]
-		mov		ax, es
-		push		ax	; [bp-12]
-
-		push		bx	; [bp-14]
-		push		cx	; [bp-16]
-		push		dx	; [bp-18]
-		push		di	; [bp-20]
-
-		; DI <- DS, ES <- DS, DS <- SS.
-		mov		di, ds
-		mov		es, di
-		mov		ax, ss
-		mov		ds, ax
-
-		; Load X into [bp-4]:
-		mov		ax, [es:bx]
-		mov		[bp-4], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-2], ax
-
-		; Rotate [bp-4] right by 2 bits:
-		lea		bx, [bp-4]
-		lea		dx, [bp-4]
-		mov		cl, 2
-		call near	rotate_right_32
-
-		; Load X into [bp-8]:
-		mov		bx, [bp-14]
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-
-		; Rotate [bp-8] right by 13 bits:
-		lea		bx, [bp-8]
-		lea		dx, [bp-8]
-		mov		cl, 13
-		call near	rotate_right_32
-
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
-		lea		dx, [bp-4]
-		lea		bx, [bp-4]
-		lea		cx, [bp-8]
-		call near	xor_32_32
-
-		; Load X into [bp-8]:
-		mov		bx, [bp-14]
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-
-		; Rotate [bp-8] right by 22 bits:
-		lea		bx, [bp-8]
-		lea		dx, [bp-8]
-		mov		cl, 22		; TODO: Skip the above load and
-		call near	rotate_right_32	; rotate by 9.
-
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
-		lea		dx, [bp-4]
-		lea		bx, [bp-4]
-		lea		cx, [bp-8]
-		call near	xor_32_32
-
-		; The anser is in [bp-4], stash it:
-		mov		bx, [bp-18]
-		mov		ax, [bp-4]
-		mov		[es:bx], ax
-		mov		ax, [bp-2]
-		mov		[es:bx+2], ax
-
-		; Restore the data segment register and GPRs:
-		mov		ds, di
-
-		pop		di
-		pop		dx
-		pop		cx
-		pop		bx
-
-		; Restore AX and ES:
-		pop		ax
-		mov		es, ax
-		pop		ax
-
-		mov		sp, bp
-		pop		bp
-		retn
-
-; Perform the upper-case Sigma1(x) function:
-;
-; The upper-case Sigma1(x) function is defined as follows:
-;
-;   ROR(X, 6) XOR ROR(X, 11) XOR ROR(X, 25)
-;
-;
-; Inputs:
-;
-;   DS:BX - Argument X (pointer to a 32-bit little-endian number).
-;   DS:DX - Pointer to where the result should be stored.
-;
-;   Note:  It is permitted to have the pointers point at the same memory
-;          locations.
-;
-; Outputs:
-;
-;   The memory that DS:DX points to will be modified to contain the result.
-;   The values of all GPRs are preserved.
-; 
-uc_sigma1:	push		bp
-		mov		bp, sp
-
-		; Allocate 2 32-bit variables on the stack:
-		sub		sp, 8	; [bp-4], [bp-8]
-
-		; Back AX and ES up:
-		push		ax	; [bp-10]
-		mov		ax, es
-		push		ax	; [bp-12]
-
-		push		bx	; [bp-14]
-		push		cx	; [bp-16]
-		push		dx	; [bp-18]
-		push		di	; [bp-20]
-
-		; DI <- DS, ES <- DS, DS <- SS.
-		mov		di, ds
-		mov		es, di
-		mov		ax, ss
-		mov		ds, ax
-
-		; Load X into [bp-4]:
-		mov		ax, [es:bx]
-		mov		[bp-4], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-2], ax
-
-		; Rotate [bp-4] right by 6 bits:
-		lea		bx, [bp-4]
-		lea		dx, [bp-4]
-		mov		cl, 6
-		call near	rotate_right_32
-
-		; Load X into [bp-8]:
-		mov		bx, [bp-14]
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-
-		; Rotate [bp-8] right by 11 bits:
-		lea		bx, [bp-8]
-		lea		dx, [bp-8]
-		mov		cl, 11
-		call near	rotate_right_32
-
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
-		lea		dx, [bp-4]
-		lea		bx, [bp-4]
-		lea		cx, [bp-8]
-		call near	xor_32_32
-
-		; Load X into [bp-8]:
-		mov		bx, [bp-14]
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-
-		; Rotate [bp-8] right by 25 bits:
-		lea		bx, [bp-8]
-		lea		dx, [bp-8]
-		mov		cl, 25		; TODO: Skip the above load and
-		call near	rotate_right_32	; rotate by 14.
-
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
-		lea		dx, [bp-4]
-		lea		bx, [bp-4]
-		lea		cx, [bp-8]
-		call near	xor_32_32
-
-		; The anser is in [bp-4], stash it:
-		mov		bx, [bp-18]
-		mov		ax, [bp-4]
-		mov		[es:bx], ax
-		mov		ax, [bp-2]
-		mov		[es:bx+2], ax
-
-		; Restore the data segment register and GPRs:
-		mov		ds, di
-
-		pop		di
-		pop		dx
-		pop		cx
-		pop		bx
-
-		; Restore AX and ES:
-		pop		ax
-		mov		es, ax
-		pop		ax
-
-		mov		sp, bp
-		pop		bp
-		retn
-
-
-; Perform the lower-case Sigma0(x) function:
-;
-; The lower-case Sigma0(x) function is defined as follows:
-;
-;   ROR(X, 7) XOR ROR(X, 18) XOR SHR(X, 3)
-;
-;
-; Inputs:
-;
-;   DS:BX - Argument X (pointer to a 32-bit little-endian number).
-;   DS:DX - Pointer to where the result should be stored.
-;
-;   Note:  It is permitted to have the pointers point at the same memory
-;          locations.
-;
-; Outputs:
-;
-;   The memory that DS:DX points to will be modified to contain the result.
-;   The values of all GPRs are preserved.
-; 
-lc_sigma0:	push		bp
-		mov		bp, sp
-
-		; Allocate 2 32-bit variables on the stack:
-		sub		sp, 8	; [bp-4], [bp-8]
-
-		; Back AX and ES up:
-		push		ax	; [bp-10]
-		mov		ax, es
-		push		ax	; [bp-12]
-
-		push		bx	; [bp-14]
-		push		cx	; [bp-16]
-		push		dx	; [bp-18]
-		push		di	; [bp-20]
-
-		; DI <- DS, ES <- DS, DS <- SS.
-		mov		di, ds
-		mov		es, di
-		mov		ax, ss
-		mov		ds, ax
-
-		; Load X into [bp-4]:
-		mov		ax, [es:bx]
-		mov		[bp-4], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-2], ax
-
-		; Rotate [bp-4] right by 7 bits:
-		lea		bx, [bp-4]
-		lea		dx, [bp-4]
-		mov		cl, 7
-		call near	rotate_right_32
-
-		; Load X into [bp-8]:
-		mov		bx, [bp-14]
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-
-		; Rotate [bp-8] right by 18 bits:
-		lea		bx, [bp-8]
-		lea		dx, [bp-8]
-		mov		cl, 18
-		call near	rotate_right_32
-
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
-		lea		dx, [bp-4]
-		lea		bx, [bp-4]
-		lea		cx, [bp-8]
-		call near	xor_32_32
-
-		; Load X into [bp-8]:
-		mov		bx, [bp-14]
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-
-		; Shift [bp-8] right by 3 bits:
-		lea		bx, [bp-8]
-		lea		dx, [bp-8]
-		mov		cl, 3
-		call near	shift_right_32
-
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
-		lea		dx, [bp-4]
-		lea		bx, [bp-4]
-		lea		cx, [bp-8]
-		call near	xor_32_32
-
-		; The anser is in [bp-4], stash it:
-		mov		bx, [bp-18]
-		mov		ax, [bp-4]
-		mov		[es:bx], ax
-		mov		ax, [bp-2]
-		mov		[es:bx+2], ax
-
-		; Restore the data segment register and GPRs:
-		mov		ds, di
-
-		pop		di
-		pop		dx
-		pop		cx
-		pop		bx
-
-		; Restore AX and ES:
-		pop		ax
-		mov		es, ax
-		pop		ax
-
-		mov		sp, bp
-		pop		bp
-		retn
-
-
-; Perform the lower-case Sigma1(x) function:
-;
-; The lower-case Sigma1(x) function is defined as follows:
-;
-;   ROR(X, 17) XOR ROR(X, 19) XOR SHR(X, 10)
-;
-;
-; Inputs:
-;
-;   DS:BX - Argument X (pointer to a 32-bit little-endian number).
-;   DS:DX - Pointer to where the result should be stored.
-;
-;   Note:  It is permitted to have the pointers point at the same memory
-;          locations.
-;
-; Outputs:
-;
-;   The memory that DS:DX points to will be modified to contain the result.
-;   The values of all GPRs are preserved.
-; 
-lc_sigma1:	push		bp
-		mov		bp, sp
-
-		; Allocate 2 32-bit variables on the stack:
-		sub		sp, 8	; [bp-4], [bp-8]
-
-		; Back AX and ES up:
-		push		ax	; [bp-10]
-		mov		ax, es
-		push		ax	; [bp-12]
-
-		push		bx	; [bp-14]
-		push		cx	; [bp-16]
-		push		dx	; [bp-18]
-		push		di	; [bp-20]
-
-		; DI <- DS, ES <- DS, DS <- SS.
-		mov		di, ds
-		mov		es, di
-		mov		ax, ss
-		mov		ds, ax
-
-		; Load X into [bp-4]:
-		mov		ax, [es:bx]
-		mov		[bp-4], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-2], ax
-
-		; Rotate [bp-4] right by 17 bits:
-		lea		bx, [bp-4]
-		lea		dx, [bp-4]
-		mov		cl, 17
-		call near	rotate_right_32
-
-		; Load X into [bp-8]:
-		mov		bx, [bp-14]
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-
-		; Rotate [bp-8] right by 19 bits:
-		lea		bx, [bp-8]
-		lea		dx, [bp-8]
-		mov		cl, 19
-		call near	rotate_right_32
-
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
-		lea		dx, [bp-4]
-		lea		bx, [bp-4]
-		lea		cx, [bp-8]
-		call near	xor_32_32
-
-		; Load X into [bp-8]:
-		mov		bx, [bp-14]
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-
-		; Shift [bp-8] right by 10 bits:
-		lea		bx, [bp-8]
-		lea		dx, [bp-8]
-		mov		cl, 10
-		call near	shift_right_32
-
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
-		lea		dx, [bp-4]
-		lea		bx, [bp-4]
-		lea		cx, [bp-8]
-		call near	xor_32_32
-
-		; The anser is in [bp-4], stash it:
-		mov		bx, [bp-18]
-		mov		ax, [bp-4]
-		mov		[es:bx], ax
-		mov		ax, [bp-2]
-		mov		[es:bx+2], ax
-
-		; Restore the data segment register and GPRs:
-		mov		ds, di
-
-		pop		di
-		pop		dx
-		pop		cx
-		pop		bx
-
-		; Restore AX and ES:
-		pop		ax
-		mov		es, ax
 		pop		ax
 
 		mov		sp, bp
