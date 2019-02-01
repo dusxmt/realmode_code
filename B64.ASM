@@ -361,8 +361,7 @@ conv_b64_bin:	push		bp
 		mov		byte [es:di], '?'
 		mov		cx, di
 
-		clc
-		cmc
+		stc
 		jmp		.epilogue
 
 .all_done:	dec		di
@@ -416,8 +415,7 @@ b64_digit_decode:
 		xor	ax, ax
 		pop	bx
 
-		clc
-		cmc
+		stc
 		retn
 
 .found:		mov	al, bl

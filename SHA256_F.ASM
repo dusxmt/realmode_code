@@ -107,19 +107,19 @@ main:		mov		bx, stdout
 
 		mov		bx, stdout
 		mov		dx, no_fname
-		call		write_str_zterm
+		call near	write_str_zterm
 		mov		al, 1
 		retn
 
 .have_fname:	mov		bx, stdout
 		mov		dx, opening_p1_str
-		call		write_str_zterm
+		call near	write_str_zterm
 
 		mov		dx, fname_str
-		call		write_str_zterm
+		call near	write_str_zterm
 
 		mov		dx, opening_p2_str
-		call		write_str_zterm
+		call near	write_str_zterm
 
 		mov		al, file_read_only
 		mov		dx, fname_str
@@ -140,7 +140,7 @@ main:		mov		bx, stdout
 .file_open:	mov		[file_handle], ax
 		mov		bx, stdout
 		mov		dx, success_str
-		call		write_str_zterm
+		call near	write_str_zterm
 
 		; Prepare the SHA256 module:
 		call near	sha256_init
@@ -153,7 +153,7 @@ main:		mov		bx, stdout
 		; Print a string to inform the user of the process:
 		mov		bx, stdout
 		mov		dx, process_str
-		call		write_str_zterm
+		call near	write_str_zterm
 
 		; Since our buffer is 64K long, which is 1 byte more than
 		; the DOS "handle" read routine can handle, fill it using
@@ -184,7 +184,7 @@ main:		mov		bx, stdout
 		xor		bx, bx
 		mov		dx, ax
 		dec		dx
-		call		sha256_hash_data
+		call near	sha256_hash_data
 
 		jmp		.read_loop
 
@@ -203,7 +203,7 @@ main:		mov		bx, stdout
 .read_done:	mov		ds, di
 		mov		bx, stdout
 		mov		dx, done_str
-		call		write_str_zterm
+		call near	write_str_zterm
 
 		; Finalize the hash and convert it into a string:
 		call near	sha256_finish
@@ -217,16 +217,16 @@ main:		mov		bx, stdout
 		call near	write_str_zterm
 
 		mov		dx, checksum_str
-		call		write_str_zterm
+		call near	write_str_zterm
 
 		mov		dx, result_sep_str
-		call		write_str_zterm
+		call near	write_str_zterm
 
 		mov		dx, fname_str
-		call		write_str_zterm
+		call near	write_str_zterm
 
 		mov		dx, newline_str
-		call		write_str_zterm
+		call near	write_str_zterm
 
 		xor		al, al
 		retn
@@ -289,6 +289,7 @@ gen_256bit_checksum_text:
 		pop		bx
 		pop		ax
 		retn
+
 
 segment read_buf_seg bss class=bss align=16
 		resb		64 * 1024

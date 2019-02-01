@@ -394,8 +394,7 @@ program_init:	push		bp
 		; The input file might be open if we failed to open the
 		; output file.
 .err_nohelp:	call near	close_files
-.err_noiclose:	clc
-		cmc
+.err_noiclose:	stc
 		jmp		.epilogue
 
 

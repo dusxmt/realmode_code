@@ -509,7 +509,7 @@ sha256_hash_chunk:
 		mov		ax, [si+2]
 		mov		[bx+2], ax
 
-		; Let e <- e + temp1
+		; Let e <- e + temp1:
 		mov		dx, bx
 		mov		cx, work_var_temp1
 		call near	add_modulo_2_32
@@ -538,13 +538,13 @@ sha256_hash_chunk:
 		mov		ax, [si+2]
 		mov		[bx+2], ax
 
-		; Let a <- temp1 + temp2
+		; Let a <- temp1 + temp2:
 		mov		bx, work_var_temp1
 		mov		cx, work_var_temp2
 		mov		dx, work_var_a
 		call near	add_modulo_2_32
 
-		; Let j <- (j + 1)
+		; Let j <- (j + 1):
 		add		di, 4
 
 		cmp		di, 64 * 4
@@ -559,7 +559,7 @@ sha256_hash_chunk:
 		mov		dx, bx
 		call near	add_modulo_2_32
 
-		add		si, 4		; j <- (j + 1)
+		add		si, 4		; j <- (j + 1).
 		cmp		si, di
 		jb		.hc_loop
 
@@ -1023,26 +1023,19 @@ sha_func_uc_sigma0:
 		mov		cl, 13
 		call near	rotate_right_32
 
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		; Let [bp-4] <- [bp-4] ^ [bp-8]:
 		lea		dx, [bp-4]
 		lea		bx, [bp-4]
 		lea		cx, [bp-8]
 		call near	xor_32_32
 
-		; Load X into [bp-8]:
-		mov		bx, [bp-14]
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-
-		; Rotate [bp-8] right by 22 bits:
+		; Rotate [bp-8] right by 9 bits (22 in total):
 		lea		bx, [bp-8]
 		lea		dx, [bp-8]
-		mov		cl, 22		; TODO: Skip the above load and
-		call near	rotate_right_32	; rotate by 9.
+		mov		cl, 9
+		call near	rotate_right_32
 
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		; Let [bp-4] <- [bp-4] ^ [bp-8]:
 		lea		dx, [bp-4]
 		lea		bx, [bp-4]
 		lea		cx, [bp-8]
@@ -1141,26 +1134,19 @@ sha_func_uc_sigma1:
 		mov		cl, 11
 		call near	rotate_right_32
 
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		; Let [bp-4] <- [bp-4] ^ [bp-8]:
 		lea		dx, [bp-4]
 		lea		bx, [bp-4]
 		lea		cx, [bp-8]
 		call near	xor_32_32
 
-		; Load X into [bp-8]:
-		mov		bx, [bp-14]
-		mov		ax, [es:bx]
-		mov		[bp-8], ax
-		mov		ax, [es:bx+2]
-		mov		[bp-6], ax
-
-		; Rotate [bp-8] right by 25 bits:
+		; Rotate [bp-8] right by 14 bits (25 in total):
 		lea		bx, [bp-8]
 		lea		dx, [bp-8]
-		mov		cl, 25		; TODO: Skip the above load and
-		call near	rotate_right_32	; rotate by 14.
+		mov		cl, 14
+		call near	rotate_right_32
 
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		; Let [bp-4] <- [bp-4] ^ [bp-8]:
 		lea		dx, [bp-4]
 		lea		bx, [bp-4]
 		lea		cx, [bp-8]
@@ -1259,7 +1245,7 @@ sha_func_lc_sigma0:
 		mov		cl, 18
 		call near	rotate_right_32
 
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		; Let [bp-4] <- [bp-4] ^ [bp-8]:
 		lea		dx, [bp-4]
 		lea		bx, [bp-4]
 		lea		cx, [bp-8]
@@ -1278,7 +1264,7 @@ sha_func_lc_sigma0:
 		mov		cl, 3
 		call near	shift_right_32
 
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		; Let [bp-4] <- [bp-4] ^ [bp-8]:
 		lea		dx, [bp-4]
 		lea		bx, [bp-4]
 		lea		cx, [bp-8]
@@ -1377,7 +1363,7 @@ sha_func_lc_sigma1:
 		mov		cl, 19
 		call near	rotate_right_32
 
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		; Let [bp-4] <- [bp-4] ^ [bp-8]:
 		lea		dx, [bp-4]
 		lea		bx, [bp-4]
 		lea		cx, [bp-8]
@@ -1396,7 +1382,7 @@ sha_func_lc_sigma1:
 		mov		cl, 10
 		call near	shift_right_32
 
-		; Let [bp-4] <- [bp-4] ^ [bp-8]
+		; Let [bp-4] <- [bp-4] ^ [bp-8]:
 		lea		dx, [bp-4]
 		lea		bx, [bp-4]
 		lea		cx, [bp-8]
@@ -1722,7 +1708,7 @@ shift_right_32: push		ax
 		mov		si, ax
 
 		mov		ax, [bx+2]
-		neg		cl		; CL <- (16 - CL)
+		neg		cl		; CL <- (16 - CL).
 		add		cl, 16
 		shl		ax, cl
 		or		ax, si
@@ -1812,7 +1798,7 @@ shift_left_32:	push		ax
 		mov		si, ax
 
 		mov		ax, [bx]
-		neg		cl		; CL <- (16 - CL)
+		neg		cl		; CL <- (16 - CL).
 		add		cl, 16
 		shr		ax, cl
 		or		ax, si

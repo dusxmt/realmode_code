@@ -114,8 +114,7 @@ write_dossyscl_error:
 					; holds a new error code.
 .write_failed:	pop		dx
 		pop		cx
-		clc
-		cmc
+		stc
 		retn
 
 
@@ -294,8 +293,7 @@ str_identity_check:
 		inc		dx
 		jmp		.check_loop
 
-.not_equal:	clc
-		cmc
+.not_equal:	stc
 		jmp		.epilogue
 
 .are_equal:	clc
@@ -335,8 +333,7 @@ char_is_space:	cmp		al, 09h	; TAB
 		cmp		al, 20h	; Literal space character
 		jz		.is_space
 
-.not_space:	clc
-		cmc
+.not_space:	stc
 		retn
 
 .is_space:	clc
