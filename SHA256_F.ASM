@@ -197,10 +197,17 @@ main:		mov		bx, stdout
 		pop		ax
 		call near	write_dossyscl_error
 
+		mov		bx, [file_handle]
+		call near	dos_syscl_hclose
+
 		mov		al, 3
 		retn
 
 .read_done:	mov		ds, di
+
+		mov		bx, [file_handle]
+		call near	dos_syscl_hclose
+
 		mov		bx, stdout
 		mov		dx, done_str
 		call near	write_str_zterm
