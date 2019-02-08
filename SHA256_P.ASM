@@ -93,10 +93,10 @@ main:		call near	sha256_init
 		call near	write_str_zterm
 
 		mov		dx, checksum_str
-		call		write_str_zterm
+		call near	write_str_zterm
 
 		mov		dx, newline_str
-		call		write_str_zterm
+		call near	write_str_zterm
 
 		xor		al, al
 		retn

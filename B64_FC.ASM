@@ -17,7 +17,7 @@ segment dseg public class=data align=16
 help_screen	db		"Usage: b64_fc [OPTIONS] <INPUT FILE> <OUTPUT FILE>", 0Dh, 0Ah
 		db		0Dh, 0Ah
 		db		"b64_fc is a program used for encoding files into a Base64 representation, as", 0Dh, 0Ah
-		db		"well as decoding Base64-encoded files.", 0Dh, 0Ah
+		db		"well as for decoding Base64-encoded files.", 0Dh, 0Ah
 		db		0Dh, 0Ah
 		db		"Command-line options:", 0Dh, 0Ah
 		db		0Dh, 0Ah
@@ -592,7 +592,7 @@ main:		call near	program_init
 		; Encode the input file:
 .perform_enc:	mov		bx, stderr
 		mov		dx, encoding_str
-		call		write_str_zterm
+		call near	write_str_zterm
 
 		mov		si, bin_buf_seg
 		mov		di, b64_buf_seg
@@ -654,7 +654,7 @@ main:		call near	program_init
 		; Decode the input file:
 .perform_dec:	mov		bx, stderr
 		mov		dx, decoding_str
-		call		write_str_zterm
+		call near	write_str_zterm
 
 		mov		si, b64_buf_seg
 		mov		di, bin_buf_seg

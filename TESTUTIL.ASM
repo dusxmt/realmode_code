@@ -136,17 +136,17 @@ main:		mov		bx, stdout
 
 		mov		bx, stdout
 		mov		ax, 5
-		call		write_dossyscl_error
+		call near	write_dossyscl_error
 		mov		ax, 4
-		call		write_dossyscl_error
+		call near	write_dossyscl_error
 		mov		ax, 19
-		call		write_dossyscl_error
+		call near	write_dossyscl_error
 		mov		ax, 15
-		call		write_dossyscl_error
+		call near	write_dossyscl_error
 		mov		ax, 34
-		call		write_dossyscl_error
+		call near	write_dossyscl_error
 		mov		ax, 6
-		call		write_dossyscl_error
+		call near	write_dossyscl_error
 
 		xor		al, al
 		retn
